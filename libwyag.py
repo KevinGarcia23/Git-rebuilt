@@ -195,3 +195,102 @@ def catFile(repo, sha, fmt = None):
     sys.stout.buffer.write(obj.serialize())
 def objectFind(repo, name, fmt = None, follow = True):
     return name
+argsp = argsubparsers.addParser(
+    "hash-object",
+    help = "Compute object ID and optionally creates a blob from a file"
+)
+argsp.add_argument("-t",
+                   metavar = "type",
+                   dest = "type", 
+                   choices = ["blob", "commit", "tag", "tree"],
+                   default = "blob",
+                   help = "Specify the type of the object")
+
+argsp.add_argument("-w",
+                   dest = "write",
+                   action = "store_true",
+                   help = "Write the object into the database")
+argsp.add_argument("path",
+                   help = "read object from <file>")
+
+def cmdHashObject(args):
+    if args.write:
+        repo = repoFind()
+    else:
+        repo = None
+    with open(args.path, "rb") as fd:
+        sha = objectHash(fd, args.type.encode(), repo)
+        print(sha)
+
+def objecthash(fd, fmt, repo = None):
+    data = fd.read()
+    
+    match fmt:
+        case b"blob" : obj = GitBlob(data)
+        case b"commit" : obj = GitCommit(data)
+        case b"tag" : obj = GitTag(data)
+        case b"tree" : obj = GitTree(data)
+        case _: raise Exception(f"Unknown type {fmt}!")
+
+    return objectWrite(obj, repo)
+
+def KVLMParse(raw, start = 0, dct = None):
+    if not dct:
+        dct = dict()
+    # this is a recursive function: it reads as key-value pairs then
+    # calls itself to back to a new position, we need to keep track of
+    # where we are at a keyword 
+    space = raw.find(b"", start)
+    newLine = raw.find(b"\n", start)
+    # If newline appears first, we assume a blank line. A blank line
+    # means the remainder of the data is the message. We store it in
+    # the dictionary, with None as the key, and return.
+    if (space < 0) or (newLine < space):
+        assert (newLine == space)
+        dct[None] = raw[start + 1:]
+        return dct
+    
+    #recursive case: we read a key-value pair and recurse
+    key = raw[start:space]
+    end = start
+    while True:
+        end = raw.find(b"\n", end + 1)
+        if raw[end + 1] != ord(" "):
+            break
+    value = raw[space + 1:end].replace(b"\n ", b"\n")
+    #dont overwrite existing data
+    if key in dct:
+        if type(dct[key]) == list:
+            dct[key].append(value)
+        else:
+            dct[key] = [dct[key], value]
+    else:
+        dct[key] = value
+    return KVLMParse(raw, start = end + 1, dct = dct)
+
+def KVLMSerialize(kvlm):
+    ret = b""
+    
+    for k in kvlm.keys():
+        if k == None: continue
+        val = kvlm[k]
+        #normalize to a list
+        if type(val) != list:
+            val = [val]
+        
+        for v in val:
+            ret += k+ b'' + (v.replace(b"\n", b"\n "))+ b"\n"
+    ret += b'\n' + kvlm[None]
+
+    return ret
+
+class GitCommit(GitObject):
+    fmt = b'commit'
+    def deserialize(self, data):
+        self.kvlm = KVLMParse(data)
+    def serialize(self):
+        return KVLMSerialize(self.kvlm)
+    def init(self):
+        self.kvlm = dict()
+
+argsp = argsubparsers.addParser("log", help = "Display history of commits")
